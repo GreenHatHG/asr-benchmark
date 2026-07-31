@@ -1,0 +1,9 @@
+[project]
+name = "asr-benchmark"
+version = "0.1.0"
+description = "Benchmark ASR accuracy and inference speed"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+package = false
