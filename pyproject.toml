@@ -2,8 +2,38 @@
 name = "asr-benchmark"
 version = "0.1.0"
 description = "Benchmark ASR accuracy and inference speed"
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "certifi>=2026.6.17",
+    "cryptography>=49.0.0",
+    "doubaoime-asr",
+    "openai>=2.15.0",
+    "soundfile>=0.13.1",
+    "torch>=2.10.0",
+    "transformers>=5.13.0",
+]
+
+[project.optional-dependencies]
+funasr = [
+    "funasr>=1.4.2,<1.5",
+    "miniaudio>=1.61",
+    "mlx>=0.25.2,<=0.29.3",
+    "mlx-audio-plus",
+    "torchaudio>=2.10.0",
+]
+fireredasr2s = [
+    "fireredasr2s",
+    "huggingface-hub>=1.26.0",
+    "kaldi-native-fbank>=1.22.3",
+    "sherpa-onnx>=1.12.27,<1.13",
+    "sherpa-onnx-core>=1.12.27,<1.13",
+]
 
 [tool.uv]
 package = false
+override-dependencies = ["transformers>=5.13.0"]
+
+[tool.uv.sources]
+doubaoime-asr = { git = "https://github.com/GreenHatHG/doubaoime-asr.git", rev = "047da05124861e3031ac802f9275273e498a5438" }
+fireredasr2s = { git = "https://github.com/FireRedTeam/FireRedASR2S.git", rev = "4e7d9aaf4482a47cec1724807026b9b151926eb5" }
+mlx-audio-plus = { git = "https://github.com/DePasqualeOrg/mlx-audio-plus.git", rev = "4c9ec6a8489e790b5ba8964ab1f1d63150476f9f" }

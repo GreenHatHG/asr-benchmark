@@ -1,0 +1,28 @@
+models = [
+    "Qwen3-ASR-0.6B",
+    "Qwen3-ASR-1.7B",
+    "FireRedASR2-AED",
+    "FireRedASR2-CTC-INT8",
+    "FireRedASR2-AED-INT8",
+    "Fun-ASR-Nano-2512",
+    "Fun-ASR-Nano-2512-MLX-8bit",
+    "Fun-ASR-Nano-2512-MLX-4bit",
+    "LLM-ASR",
+    "Doubao-IME-ASR",
+]
+runs = 1
+warmup_runs = 0
+
+[llm]
+model = "your-audio-model"
+base_url = "https://provider.example/v1"
+
+[[samples]]
+id = "hello-zh"
+audio = "hello_zh.wav"
+reference = "你好世界。"
+
+[[samples]]
+id = "hello-en"
+audio = "hello_en.wav"
+reference = "Hello speech."
