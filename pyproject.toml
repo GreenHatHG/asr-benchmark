@@ -13,6 +13,13 @@ dependencies = [
     "transformers>=5.13.0",
 ]
 
+[project.scripts]
+asr-benchmark = "asr_benchmark.benchmark:main"
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
+
 [project.optional-dependencies]
 funasr = [
     "funasr>=1.4.2,<1.5",
@@ -30,7 +37,6 @@ fireredasr2s = [
 ]
 
 [tool.uv]
-package = false
 override-dependencies = ["transformers>=5.13.0"]
 
 [tool.uv.sources]

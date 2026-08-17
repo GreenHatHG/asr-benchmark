@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ..paths import PROJECT_ROOT
+
 OFFICIAL_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 OFFICIAL_MODEL_DIRECTORY_ENV = "FUN_ASR_NANO_MODEL_DIR"
 MLX_8BIT_MODEL_ID = "mlx-community/Fun-ASR-Nano-2512-8bit"
@@ -95,7 +97,7 @@ def resolve_official_model_reference() -> str:
 
     model_directory = Path(configured_directory).expanduser()
     if not model_directory.is_absolute():
-        model_directory = Path(__file__).resolve().parent / model_directory
+        model_directory = PROJECT_ROOT / model_directory
     return str(model_directory.resolve())
 
 

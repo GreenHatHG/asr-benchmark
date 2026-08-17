@@ -20,26 +20,26 @@ from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
-from asr_reporting import (
+from .adapters.doubao import DOUBAO_ASR_MODEL_NAME, create_doubao_asr
+from .adapters.firered_onnx import (
+    create_fireredasr2_aed_int8,
+    create_fireredasr2_ctc_int8,
+)
+from .adapters.fireredasr2 import create_fireredasr2_aed
+from .adapters.fireredpunc import create_punctuated_adapter
+from .adapters.fun_asr import (
+    create_fun_asr_nano_mlx_4bit,
+    create_fun_asr_nano_mlx_8bit,
+    create_fun_asr_nano_official,
+)
+from .adapters.llm_asr import LLM_ASR_MODEL_NAME, LlmAsrConfig, create_llm_asr
+from .adapters.qwen3_asr import create_qwen3_asr_0_6b, create_qwen3_asr_1_7b
+from .reporting import (
     ModelSummary,
     RecognitionResult,
     render_recognition_results,
     render_summary_table,
 )
-from doubao_asr_adapter import DOUBAO_ASR_MODEL_NAME, create_doubao_asr
-from firered_onnx_adapter import (
-    create_fireredasr2_aed_int8,
-    create_fireredasr2_ctc_int8,
-)
-from fireredasr2_adapter import create_fireredasr2_aed
-from fireredpunc_adapter import create_punctuated_adapter
-from fun_asr_adapter import (
-    create_fun_asr_nano_mlx_4bit,
-    create_fun_asr_nano_mlx_8bit,
-    create_fun_asr_nano_official,
-)
-from llm_asr_adapter import LLM_ASR_MODEL_NAME, LlmAsrConfig, create_llm_asr
-from qwen3_asr_adapter import create_qwen3_asr_0_6b, create_qwen3_asr_1_7b
 
 DEFAULT_RUNS = 1
 DEFAULT_WARMUP_RUNS = 0

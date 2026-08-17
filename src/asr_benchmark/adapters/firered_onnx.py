@@ -8,6 +8,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
+from ..paths import PROJECT_ROOT
+
 SHERPA_NUM_THREADS = 2
 DEFAULT_CTC_MODEL_DIRECTORY = Path(
     "pretrained_models/sherpa-onnx-fire-red-asr2-ctc-zh_en-int8-2026-02-25"
@@ -113,7 +115,7 @@ def read_audio_samples(audio_path: Path) -> list[float]:
 
 def resolve_directory(model_directory: Path) -> Path:
     if not model_directory.is_absolute():
-        model_directory = Path(__file__).resolve().parent / model_directory
+        model_directory = PROJECT_ROOT / model_directory
     return model_directory.expanduser().resolve()
 
 

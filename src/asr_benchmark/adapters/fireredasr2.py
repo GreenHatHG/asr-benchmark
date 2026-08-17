@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ..paths import PROJECT_ROOT
+
 MODEL_DIRECTORY_ENV = "FIREREDASR2_MODEL_DIR"
 DEFAULT_MODEL_DIRECTORY = Path("pretrained_models/FireRedASR2-AED")
 MODEL_REPORT_NAME = "FireRedTeam/FireRedASR2-AED (FP32, 未量化)"
@@ -68,7 +70,7 @@ def resolve_model_directory(model_directory: Path | None) -> Path:
         os.environ.get(MODEL_DIRECTORY_ENV, DEFAULT_MODEL_DIRECTORY)
     )
     if not configured_directory.is_absolute():
-        configured_directory = Path(__file__).resolve().parent / configured_directory
+        configured_directory = PROJECT_ROOT / configured_directory
     return configured_directory.expanduser().resolve()
 
 
