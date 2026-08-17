@@ -7,8 +7,9 @@ models = [
     "Fun-ASR-Nano-2512",
     "Fun-ASR-Nano-2512-MLX-8bit",
     "Fun-ASR-Nano-2512-MLX-4bit",
-    "LLM-ASR",
+    # "LLM-ASR",
     "Doubao-IME-ASR",
+    # "Tingwu-Realtime-ASR",
 ]
 runs = 1
 warmup_runs = 0
@@ -17,12 +18,46 @@ warmup_runs = 0
 model = "your-audio-model"
 base_url = "https://provider.example/v1"
 
+[tingwu]
+source_language = "multilingual"
+language_hints = ["cn", "en"]
+
 [[samples]]
-id = "hello-zh"
-audio = "hello_zh.wav"
+id = "sample1"
+audio = "sample1.wav"
 reference = "你好世界。"
 
 [[samples]]
-id = "hello-en"
-audio = "hello_en.wav"
-reference = "Hello speech."
+id = "sample2"
+audio = "sample2.wav"
+reference = "你好世界。"
+
+[[samples]]
+id = "sample3"
+audio = "sample3.wav"
+reference = "你好世界。"
+
+[[samples]]
+id = "sample4"
+audio = "sample4.wav"
+reference = "你好世界。"
+
+[[samples]]
+id = "sample5"
+audio = "sample5.wav"
+reference = "你好世界。"
+
+[[samples]]
+id = "sample6"
+audio = "sample6.wav"
+reference = "你好世界。"
+
+[[samples]]
+id = "sample7"
+audio = "sample7.wav"
+reference = "你好世界。"
+
+[[samples]]
+id = "sample8"
+audio = "sample8.wav"
+reference = "你好世界。"

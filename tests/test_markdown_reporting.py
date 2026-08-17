@@ -50,10 +50,21 @@ class MarkdownReportingTest(unittest.TestCase):
         report = render_markdown_report(
             summaries,
             results,
-            samples=(ReportSample("sample-1", "参考"),),
+            samples=(
+                ReportSample(
+                    "sample-1",
+                    "参考",
+                    Path("audio/sample.wav"),
+                    12.345,
+                ),
+            ),
             failures=(SampleFailure("Doubao-IME-ASR", "sample-1", "请求超时"),),
         )
 
+        self.assertIn(
+            "音频文件：sample.wav · 时长：12.35 秒 · 参考文本长度：2 个字符",
+            report,
+        )
         self.assertIn("| Doubao | IME-ASR | - | 识别失败：请求超时 |", report)
 
     def test_report_is_saved_next_to_config(self) -> None:

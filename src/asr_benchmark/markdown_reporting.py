@@ -34,6 +34,8 @@ class ModelIdentity:
 class ReportSample:
     sample_id: str
     reference: str
+    audio_path: Path | None = None
+    duration_seconds: float | None = None
 
 
 class ReportSampleLike(Protocol):
@@ -42,6 +44,12 @@ class ReportSampleLike(Protocol):
 
     @property
     def reference(self) -> str: ...
+
+    @property
+    def audio_path(self) -> Path | None: ...
+
+    @property
+    def duration_seconds(self) -> float | None: ...
 
 
 class ReportFailureLike(Protocol):
@@ -168,6 +176,8 @@ def render_sample_section(
         "",
         f"## 样本：{escape_markdown_text(sample.sample_id)}",
         "",
+        render_sample_metadata(sample),
+        "",
         "| 系列 | 模型版本 | 字符错误率 | 识别文本 |",
         "| --- | --- | ---: | --- |",
         f"| 参考 | 参考文本 | - | {escape_markdown_cell(display_text(sample.reference))} |",
@@ -208,6 +218,16 @@ def render_sample_section(
                 + " |"
             )
     return lines
+
+
+def render_sample_metadata(sample: ReportSampleLike) -> str:
+    metadata: list[str] = []
+    if sample.audio_path is not None:
+        metadata.append(f"音频文件：{escape_markdown_text(sample.audio_path.name)}")
+    if sample.duration_seconds is not None:
+        metadata.append(f"时长：{sample.duration_seconds:.2f} 秒")
+    metadata.append(f"参考文本长度：{len(sample.reference)} 个字符")
+    return " · ".join(metadata)
 
 
 def derive_samples(results: Sequence[RecognitionResult]) -> tuple[ReportSample, ...]:
