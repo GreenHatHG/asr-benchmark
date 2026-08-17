@@ -18,8 +18,8 @@ class Qwen3AsrAdapter:
         torch, soundfile, auto_model, auto_processor = import_dependencies()
         self._torch = torch
         self._soundfile = soundfile
-        self._processor: Any | None = auto_processor.from_pretrained(model_id)
-        self._model: Any | None = auto_model.from_pretrained(
+        processor = auto_processor.from_pretrained(model_id)
+        model = auto_model.from_pretrained(
             model_id,
             dtype="auto",
             low_cpu_mem_usage=True,
@@ -27,8 +27,10 @@ class Qwen3AsrAdapter:
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cuda":
-            self._model.to(self.device)
-        dtype_name = str(self._model.dtype).removeprefix("torch.")
+            model.to(self.device)
+        dtype_name = str(model.dtype).removeprefix("torch.")
+        self._processor: Any | None = processor
+        self._model: Any | None = model
         self.name = f"{model_id} ({dtype_name})"
 
     def transcribe(self, audio_path: Path) -> str:

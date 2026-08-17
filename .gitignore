@@ -1,4 +1,7 @@
 .venv/
+.mypy_cache/
+.npm-cache/
+.ruff_cache/
 __pycache__/
 *.py[cod]
 pretrained_models/

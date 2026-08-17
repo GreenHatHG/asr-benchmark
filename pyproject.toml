@@ -20,6 +20,14 @@ asr-benchmark = "asr_benchmark.benchmark:main"
 requires = ["uv_build>=0.9.26,<0.10.0"]
 build-backend = "uv_build"
 
+[dependency-groups]
+dev = [
+    "mypy>=2.1.0",
+    "pre-commit>=3.0.0",
+    "pylint>=4.0.6",
+    "pyright>=1.1.411",
+]
+
 [project.optional-dependencies]
 funasr = [
     "funasr>=1.4.2,<1.5",
@@ -38,6 +46,65 @@ fireredasr2s = [
 
 [tool.uv]
 override-dependencies = ["transformers>=5.13.0"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = [
+    "doubaoime_asr",
+    "fireredasr2s.*",
+    "funasr",
+    "mlx",
+    "mlx.*",
+    "mlx_audio.*",
+    "sherpa_onnx",
+    "soundfile",
+]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "C90",
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "SIM",
+]
+ignore = [
+    "SIM105",
+    "SIM108",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.vulture]
+paths = ["src"]
+min_confidence = 60
+sort_by_size = true
+
+[tool.pylint.design]
+max-attributes = 8
+max-locals = 16
+
+[tool.pylint."messages control"]
+disable = [
+    "broad-exception-caught",
+    "duplicate-code",
+    "import-outside-toplevel",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "missing-module-docstring",
+    "too-few-public-methods",
+    "unnecessary-ellipsis",
+]
 
 [tool.uv.sources]
 doubaoime-asr = { git = "https://github.com/GreenHatHG/doubaoime-asr.git", rev = "047da05124861e3031ac802f9275273e498a5438" }

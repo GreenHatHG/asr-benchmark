@@ -1,0 +1,19 @@
+{
+  "minTokens": 20,
+  "minLines": 8,
+  "format": [
+    "python"
+  ],
+  "ignore": [
+    ".venv/**",
+    ".git/**",
+    ".npm-cache/**",
+    ".mypy_cache/**",
+    ".ruff_cache/**",
+    "pretrained_models/**"
+  ],
+  "reporters": [
+    "console-full"
+  ],
+  "pattern": "*.py"
+}

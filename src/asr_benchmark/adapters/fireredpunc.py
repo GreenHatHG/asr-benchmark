@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..paths import PROJECT_ROOT
+from ..paths import ConfiguredDirectory, find_missing_files
 
 MODEL_DIRECTORY_ENV = "FIREREDPUNC_MODEL_DIR"
 DEFAULT_MODEL_DIRECTORY = Path("pretrained_models/FireRedPunc")
+MODEL_DIRECTORY_CONFIG = ConfiguredDirectory(
+    environment_variable=MODEL_DIRECTORY_ENV,
+    default_directory=DEFAULT_MODEL_DIRECTORY,
+)
 REQUIRED_MODEL_FILES = (
     "chinese-bert-wwm-ext_vocab.txt",
     "chinese-lert-base/config.json",
@@ -93,26 +96,17 @@ class PunctuatedAsrAdapter:
             self._asr.close()
 
 
-def resolve_model_directory(model_directory: Path | None) -> Path:
-    configured_directory = model_directory or Path(
-        os.environ.get(MODEL_DIRECTORY_ENV, DEFAULT_MODEL_DIRECTORY)
-    )
-    if not configured_directory.is_absolute():
-        configured_directory = PROJECT_ROOT / configured_directory
-    return configured_directory.expanduser().resolve()
-
-
 def validate_model_directory(model_directory: Path) -> None:
-    missing_files = [
-        filename
-        for filename in REQUIRED_MODEL_FILES
-        if not (model_directory / filename).is_file()
-    ]
+    missing_files = find_missing_files(model_directory, REQUIRED_MODEL_FILES)
     if missing_files:
         raise FileNotFoundError(
             f"FireRedPunc 模型目录不完整：{model_directory}；"
             f"缺少 {', '.join(missing_files)}。"
         )
+
+
+def resolve_model_directory(model_directory: Path | None) -> Path:
+    return MODEL_DIRECTORY_CONFIG.resolve(model_directory)
 
 
 def create_punctuated_adapter(asr_factory: Callable[[], Any]) -> PunctuatedAsrAdapter:

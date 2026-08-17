@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import array
 import os
+import sys
 import wave
 from pathlib import Path
 from typing import Any
@@ -41,13 +42,15 @@ class SherpaFireRedAsrAdapter:
 
         self.name = name
         self.device = "cpu"
-        self._recognizer = create_recognizer(
+        self._recognizer: Any | None = create_recognizer(
             sherpa_onnx,
             self._model_directory,
             model_kind,
         )
 
     def transcribe(self, audio_path: Path) -> str:
+        if self._recognizer is None:
+            raise RuntimeError(f"{self.name} 适配器已经释放")
         samples = read_audio_samples(audio_path)
         stream = self._recognizer.create_stream()
         stream.accept_waveform(16000, samples)
@@ -108,7 +111,7 @@ def read_audio_samples(audio_path: Path) -> list[float]:
 
     pcm_samples = array.array("h")
     pcm_samples.frombytes(frames)
-    if os.sys.byteorder != "little":
+    if sys.byteorder != "little":
         pcm_samples.byteswap()
     return [sample / 32768.0 for sample in pcm_samples]
 

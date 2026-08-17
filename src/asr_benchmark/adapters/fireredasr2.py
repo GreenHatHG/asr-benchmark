@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
-from ..paths import PROJECT_ROOT
+from ..paths import ConfiguredDirectory, find_missing_files
 
 MODEL_DIRECTORY_ENV = "FIREREDASR2_MODEL_DIR"
 DEFAULT_MODEL_DIRECTORY = Path("pretrained_models/FireRedASR2-AED")
+MODEL_DIRECTORY_CONFIG = ConfiguredDirectory(
+    environment_variable=MODEL_DIRECTORY_ENV,
+    default_directory=DEFAULT_MODEL_DIRECTORY,
+)
 MODEL_REPORT_NAME = "FireRedTeam/FireRedASR2-AED (FP32, 未量化)"
 MODEL_DOWNLOAD_COMMAND = (
     "HF_HUB_DISABLE_XET=1 uv run --extra fireredasr2s hf download "
@@ -66,20 +69,11 @@ class FireRedAsr2AedAdapter:
 
 
 def resolve_model_directory(model_directory: Path | None) -> Path:
-    configured_directory = model_directory or Path(
-        os.environ.get(MODEL_DIRECTORY_ENV, DEFAULT_MODEL_DIRECTORY)
-    )
-    if not configured_directory.is_absolute():
-        configured_directory = PROJECT_ROOT / configured_directory
-    return configured_directory.expanduser().resolve()
+    return MODEL_DIRECTORY_CONFIG.resolve(model_directory)
 
 
 def validate_model_directory(model_directory: Path) -> None:
-    missing_files = [
-        filename
-        for filename in REQUIRED_MODEL_FILES
-        if not (model_directory / filename).is_file()
-    ]
+    missing_files = find_missing_files(model_directory, REQUIRED_MODEL_FILES)
     if missing_files:
         missing_text = ", ".join(missing_files)
         raise FileNotFoundError(

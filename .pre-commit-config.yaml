@@ -1,0 +1,70 @@
+default_language_version:
+  python: python3
+
+ci:
+  skip: []
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        exclude: uv.lock
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 'v0.14.14'
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.1
+    hooks:
+      - id: codespell
+        additional_dependencies: ["tomli"]
+        exclude: uv.lock
+
+  - repo: https://github.com/jendrikseipp/vulture
+    rev: 'v2.14'
+    hooks:
+      - id: vulture
+        pass_filenames: false
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy src
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pyright
+        name: pyright
+        entry: uv run python -m pyright
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: pylint
+        name: pylint
+        entry: uv run python -m pylint --score=n
+        language: system
+        types: [python]
+
+      - id: jscpd
+        name: jscpd
+        entry: npm --cache .npm-cache exec --yes --package jscpd@5.0.12 -- jscpd . --config .jscpd.json --absolute --no-colors --no-tips --exit-code 1
+        language: system
+        pass_filenames: false
+        stages: [manual]
+        types: [python]

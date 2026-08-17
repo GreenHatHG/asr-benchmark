@@ -325,11 +325,12 @@ def load_adapter(
     if model_name == LLM_ASR_MODEL_NAME:
         if llm_config is None:
             raise BenchmarkError("加载 LLM-ASR 时缺少 [llm] 配置")
-        factory: Callable[[], Any] | None = partial(create_llm_asr, llm_config)
+        factory: Callable[[], Any] = partial(create_llm_asr, llm_config)
     else:
-        factory = MODEL_FACTORIES.get(model_name)
-        if factory is None:
+        model_factory = MODEL_FACTORIES.get(model_name)
+        if model_factory is None:
             raise BenchmarkError(f"不支持的模型：{model_name}")
+        factory = model_factory
 
     try:
         adapter_object = factory()
@@ -342,7 +343,7 @@ def load_adapter(
         raise BenchmarkError(
             f"模型 {model_name} 的工厂函数必须返回可调用对象或带 transcribe 方法的对象"
         )
-    transcribe = cast(Callable[[Path], str], transcribe_value)
+    transcribe_callable = cast(Callable[[Path], str], transcribe_value)
     close = getattr(adapter_object, "close", None)
     if close is not None and not callable(close):
         raise BenchmarkError(f"模型 {model_name} 的 close 属性必须可调用")
@@ -355,16 +356,16 @@ def load_adapter(
     get_last_raw_text_value = getattr(adapter_object, "get_last_raw_text", None)
     if get_last_raw_text_value is not None and not callable(get_last_raw_text_value):
         raise BenchmarkError(f"模型 {model_name} 的 get_last_raw_text 属性必须可调用")
-    get_last_raw_text = cast(
+    get_last_raw_text_callable = cast(
         Callable[[], str | None] | None,
         get_last_raw_text_value,
     )
     return ModelAdapter(
         report_name.strip(),
-        transcribe,
+        transcribe_callable,
         close,
         device.strip(),
-        get_last_raw_text,
+        get_last_raw_text_callable,
     )
 
 
