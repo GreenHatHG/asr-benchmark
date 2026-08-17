@@ -22,6 +22,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
+from .audio_normalization import AudioNormalizationError, normalize_audio_files
 from .adapters.doubao import DOUBAO_ASR_MODEL_NAME, create_doubao_asr
 from .adapters.firered_onnx import (
     create_fireredasr2_aed_int8,
@@ -137,6 +138,11 @@ def parse_arguments() -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="复用缓存中已成功的转写，只运行尚未完成的模型和样本",
+    )
+    parser.add_argument(
+        "--normalize-audio",
+        action="store_true",
+        help="将配置中的 WAV 原地替换为 16kHz、16 位、单声道 PCM WAV",
     )
     return parser.parse_args()
 
@@ -928,6 +934,12 @@ def main() -> int:
             config.runs,
             config.warmup_runs,
         )
+        if arguments.normalize_audio:
+            logger.info("正在原地标准化音频：样本数=%d", len(config.samples))
+            normalize_audio_files(tuple(sample.audio_path for sample in config.samples))
+            # 重新读取配置，以标准化后 WAV 的帧数计算实际音频时长。
+            config = load_config(arguments.config)
+            logger.info("音频标准化完成：样本数=%d", len(config.samples))
         cache_path = cache_path_for_config(arguments.config)
         cache_action = "读取" if arguments.resume and cache_path.exists() else "初始化"
         logger.info(
@@ -953,7 +965,11 @@ def main() -> int:
             config.llm_config,
             cache=cache,
         )
-    except (BenchmarkError, TranscriptionCacheError) as error:
+    except (
+        AudioNormalizationError,
+        BenchmarkError,
+        TranscriptionCacheError,
+    ) as error:
         print(f"错误：{error}", file=sys.stderr)
         return 2
 
