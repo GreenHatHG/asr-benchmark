@@ -5,3 +5,4 @@
 __pycache__/
 *.py[cod]
 pretrained_models/
+*.toml.cache.json

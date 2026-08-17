@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import math
 import sys
 import time
@@ -39,6 +40,13 @@ from .reporting import (
     RecognitionResult,
     render_recognition_results,
     render_summary_table,
+)
+from .transcription_cache import (
+    CachedModel,
+    CachedTranscription,
+    TranscriptionCache,
+    TranscriptionCacheError,
+    cache_path_for_config,
 )
 
 DEFAULT_RUNS = 1
@@ -108,6 +116,14 @@ class SampleFailure:
     message: str
 
 
+@dataclass(frozen=True)
+class ActiveModelCache:
+    """把转写缓存和当前使用的配置模型名称放在一起。"""
+
+    storage: TranscriptionCache
+    model_name: str
+
+
 def parse_arguments() -> argparse.Namespace:
     """读取命令行参数，并在参数格式不正确时由 argparse 显示错误。"""
 
@@ -115,6 +131,11 @@ def parse_arguments() -> argparse.Namespace:
         description="按照 TOML 配置执行 ASR 识别文本和速度基准测试。",
     )
     parser.add_argument("config", type=Path, help="TOML 基准测试配置文件路径")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="复用缓存中已成功的转写，只运行尚未完成的模型和样本",
+    )
     return parser.parse_args()
 
 
@@ -155,7 +176,35 @@ def load_config(config_path: Path) -> BenchmarkConfig:
         parse_audio_sample(sample_value, sample_number, resolved_config.parent)
         for sample_number, sample_value in enumerate(samples_value, start=1)
     )
+    if len(samples) != len({sample.sample_id for sample in samples}):
+        raise BenchmarkError("配置中的 samples id 必须唯一")
     return BenchmarkConfig(model_names, samples, runs, warmup_runs, llm_config)
+
+
+def build_configuration_fingerprint(
+    config_path: Path,
+    samples: Sequence[AudioSample],
+) -> str:
+    """计算配置和音频内容的摘要，用于拒绝不匹配的恢复缓存。"""
+
+    fingerprint = hashlib.sha256()
+    paths = (
+        config_path.expanduser().resolve(),
+        *(sample.audio_path for sample in samples),
+    )
+    for path in paths:
+        file_fingerprint = hashlib.sha256()
+        try:
+            with path.open("rb") as input_file:
+                while chunk := input_file.read(1024 * 1024):
+                    file_fingerprint.update(chunk)
+        except OSError as error:
+            raise BenchmarkError(
+                f"计算转写缓存标识时无法读取文件：{path}：{error}"
+            ) from error
+        # 每个文件先生成固定 32 字节的摘要，避免二进制内容与分隔符混淆。
+        fingerprint.update(file_fingerprint.digest())
+    return fingerprint.hexdigest()
 
 
 def parse_model_names(value: Any) -> tuple[str, ...]:
@@ -369,12 +418,14 @@ def load_adapter(
     )
 
 
-def benchmark_models(
+def benchmark_models(  # pylint: disable=too-many-arguments
     model_names: Sequence[str],
     samples: Sequence[AudioSample],
     runs: int,
     warmup_runs: int,
     llm_config: LlmAsrConfig | None = None,
+    *,
+    cache: TranscriptionCache | None = None,
 ) -> tuple[list[ModelSummary], list[RecognitionResult], list[SampleFailure]]:
     """依次测试所有模型，返回识别结果、速度汇总和失败样本记录。
 
@@ -387,43 +438,128 @@ def benchmark_models(
     failures: list[SampleFailure] = []
     validate_model_names(model_names)
     for model_name in model_names:
-        # 加载耗时单独统计，不会混入后面的单次识别耗时。
-        load_started_at = time.perf_counter()
-        try:
-            adapter = load_adapter(model_name, llm_config)
-        except Exception as error:  # noqa: BLE001 - one model failure must not stop the run
-            load_latency_seconds = time.perf_counter() - load_started_at
-            summaries.append(
-                empty_summary(
-                    model_name,
-                    "unavailable",
-                    len(samples),
-                    load_latency_seconds,
-                )
-            )
-            failures.append(SampleFailure(model_name, "<load>", str(error)))
-            continue
+        summary, model_results, model_failures = benchmark_registered_model(
+            model_name,
+            samples,
+            runs,
+            warmup_runs,
+            llm_config,
+            cache=cache,
+        )
+        summaries.append(summary)
+        recognition_results.extend(model_results)
+        failures.extend(model_failures)
+    return summaries, recognition_results, failures
+
+
+def benchmark_registered_model(  # pylint: disable=too-many-arguments
+    model_name: str,
+    samples: Sequence[AudioSample],
+    runs: int,
+    warmup_runs: int,
+    llm_config: LlmAsrConfig | None,
+    *,
+    cache: TranscriptionCache | None,
+) -> tuple[ModelSummary, list[RecognitionResult], list[SampleFailure]]:
+    """读取缓存或加载一个配置模型，并完成该模型的所有样本。"""
+
+    if cache is not None:
+        cached_outcome = restore_completed_model(
+            cache.get_model(model_name),
+            samples,
+            runs,
+        )
+        if cached_outcome is not None:
+            summary, recognition_results = cached_outcome
+            return summary, recognition_results, []
+
+    # 加载耗时单独统计，不会混入后面的单次识别耗时。
+    load_started_at = time.perf_counter()
+    try:
+        adapter = load_adapter(model_name, llm_config)
+    except Exception as error:  # noqa: BLE001 - one model failure must not stop the run
         load_latency_seconds = time.perf_counter() - load_started_at
-        try:
-            warm_up_adapter(adapter, samples[0], warmup_runs)
-            summary, model_results, model_failures = benchmark_model(
-                adapter,
-                samples,
-                runs,
+        return (
+            empty_summary(
+                model_name,
+                "unavailable",
+                len(samples),
+                load_latency_seconds,
+            ),
+            [],
+            [SampleFailure(model_name, "<load>", str(error))],
+        )
+
+    load_latency_seconds = time.perf_counter() - load_started_at
+    try:
+        active_cache = None
+        if cache is not None:
+            cache.set_model_metadata(
+                model_name,
+                adapter.name,
+                adapter.device,
                 load_latency_seconds,
             )
-            summaries.append(summary)
-            recognition_results.extend(model_results)
-            failures.extend(model_failures)
+            active_cache = ActiveModelCache(cache, model_name)
+        warm_up_adapter(adapter, samples[0], warmup_runs)
+        return benchmark_model(
+            adapter,
+            samples,
+            runs,
+            load_latency_seconds,
+            active_cache=active_cache,
+        )
+    finally:
+        # 即使 close 自身失败，也要删除当前引用并触发垃圾回收，避免
+        # 前一个模型占用的内存影响下一个模型。
+        try:
+            close_adapter(adapter)
         finally:
-            # 即使 close 自身失败，也要删除当前引用并触发垃圾回收，避免
-            # 前一个模型占用的内存影响下一个模型。
-            try:
-                close_adapter(adapter)
-            finally:
-                del adapter
-                gc.collect()
-    return summaries, recognition_results, failures
+            del adapter
+            gc.collect()
+
+
+def restore_completed_model(
+    cached_model: CachedModel | None,
+    samples: Sequence[AudioSample],
+    runs: int,
+) -> tuple[ModelSummary, list[RecognitionResult]] | None:
+    """在模型的所有样本都有缓存时，直接重建报告结果。"""
+
+    if cached_model is None:
+        return None
+    if any(sample.sample_id not in cached_model.transcriptions for sample in samples):
+        return None
+
+    elapsed_seconds = 0.0
+    recognition_results: list[RecognitionResult] = []
+    for sample in samples:
+        cached_transcription = cached_model.transcriptions[sample.sample_id]
+        elapsed_seconds += cached_transcription.elapsed_seconds
+        recognition_results.append(
+            RecognitionResult(
+                model_name=cached_model.report_name,
+                sample_id=sample.sample_id,
+                reference=sample.reference,
+                raw_hypothesis=cached_transcription.raw_hypothesis,
+                hypothesis=cached_transcription.hypothesis,
+            )
+        )
+    invocation_count = len(samples) * runs
+    processed_audio_seconds = sum(sample.duration_seconds for sample in samples) * runs
+    return (
+        ModelSummary(
+            name=cached_model.report_name,
+            device=cached_model.device,
+            total_samples=len(samples),
+            successful_samples=len(samples),
+            failed_samples=0,
+            load_latency_seconds=cached_model.load_latency_seconds,
+            average_latency_seconds=elapsed_seconds / invocation_count,
+            real_time_factor=elapsed_seconds / processed_audio_seconds,
+        ),
+        recognition_results,
+    )
 
 
 def close_adapter(adapter: ModelAdapter) -> None:
@@ -462,6 +598,8 @@ def benchmark_model(
     samples: Sequence[AudioSample],
     runs: int,
     load_latency_seconds: float = 0.0,
+    *,
+    active_cache: ActiveModelCache | None = None,
 ) -> tuple[ModelSummary, list[RecognitionResult], list[SampleFailure]]:
     """测试一个模型，并收集识别文本和处理速度。
 
@@ -472,19 +610,39 @@ def benchmark_model(
 
     elapsed_seconds = 0.0
     processed_audio_seconds = 0.0
-    successful_samples = 0
     recognition_results: list[RecognitionResult] = []
     failures: list[SampleFailure] = []
 
     for sample in samples:
-        try:
-            raw_hypothesis, hypothesis, sample_elapsed = run_sample(
-                adapter, sample, runs
-            )
-        except Exception as error:  # noqa: BLE001 - continue with remaining samples
-            # 一条音频失败不应阻止同一模型继续测试配置中的其他音频。
-            failures.append(SampleFailure(adapter.name, sample.sample_id, str(error)))
-            continue
+        cached_transcription = get_cached_transcription(
+            active_cache,
+            sample.sample_id,
+        )
+        if cached_transcription is None:
+            try:
+                raw_hypothesis, hypothesis, sample_elapsed = run_sample(
+                    adapter, sample, runs
+                )
+            except Exception as error:  # noqa: BLE001 - continue with remaining samples
+                # 一条音频失败不应阻止同一模型继续测试配置中的其他音频。
+                failures.append(
+                    SampleFailure(adapter.name, sample.sample_id, str(error))
+                )
+                continue
+            if active_cache is not None:
+                active_cache.storage.set_transcription(
+                    active_cache.model_name,
+                    sample.sample_id,
+                    CachedTranscription(
+                        raw_hypothesis,
+                        hypothesis,
+                        sample_elapsed,
+                    ),
+                )
+        else:
+            raw_hypothesis = cached_transcription.raw_hypothesis
+            hypothesis = cached_transcription.hypothesis
+            sample_elapsed = cached_transcription.elapsed_seconds
 
         recognition_results.append(
             RecognitionResult(
@@ -497,9 +655,8 @@ def benchmark_model(
         )
         elapsed_seconds += sample_elapsed
         processed_audio_seconds += sample.duration_seconds * runs
-        successful_samples += 1
 
-    if successful_samples == 0:
+    if not recognition_results:
         return (
             empty_summary(
                 adapter.name,
@@ -511,21 +668,34 @@ def benchmark_model(
             failures,
         )
 
-    invocation_count = successful_samples * runs
     return (
         ModelSummary(
             name=adapter.name,
             device=adapter.device,
             total_samples=len(samples),
-            successful_samples=successful_samples,
-            failed_samples=len(samples) - successful_samples,
+            successful_samples=len(recognition_results),
+            failed_samples=len(samples) - len(recognition_results),
             load_latency_seconds=load_latency_seconds,
-            average_latency_seconds=elapsed_seconds / invocation_count,
+            average_latency_seconds=elapsed_seconds / (len(recognition_results) * runs),
             real_time_factor=elapsed_seconds / processed_audio_seconds,
         ),
         recognition_results,
         failures,
     )
+
+
+def get_cached_transcription(
+    active_cache: ActiveModelCache | None,
+    sample_id: str,
+) -> CachedTranscription | None:
+    """读取一条已成功的转写；未启用缓存或没有命中时返回 ``None``。"""
+
+    if active_cache is None:
+        return None
+    cached_model = active_cache.storage.get_model(active_cache.model_name)
+    if cached_model is None:
+        return None
+    return cached_model.transcriptions.get(sample_id)
 
 
 def run_sample(
@@ -621,20 +791,28 @@ def main() -> int:
     arguments = parse_arguments()
     try:
         config = load_config(arguments.config)
+        cache_path = cache_path_for_config(arguments.config)
+        cache = TranscriptionCache.prepare(
+            cache_path,
+            build_configuration_fingerprint(arguments.config, config.samples),
+            resume=arguments.resume,
+        )
         summaries, recognition_results, failures = benchmark_models(
             config.model_names,
             config.samples,
             config.runs,
             config.warmup_runs,
             config.llm_config,
+            cache=cache,
         )
-    except BenchmarkError as error:
+    except (BenchmarkError, TranscriptionCacheError) as error:
         print(f"错误：{error}", file=sys.stderr)
         return 2
 
     print(render_recognition_results(recognition_results))
     print()
     print(render_summary_table(summaries))
+    print(f"\n转写缓存：{cache_path}")
     print_failures(failures)
     return 1 if failures else 0
 
