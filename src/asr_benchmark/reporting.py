@@ -38,7 +38,7 @@ class ModelSummary:
         return 1.0 / self.real_time_factor
 
 
-def render_summary_table(summaries: Sequence[ModelSummary]) -> str:
+def render_summary_table(summaries: Sequence[ModelSummary]) -> str:  # noqa
     rows = [summary_to_row(summary) for summary in summaries]
     widths = [
         max(display_width(str(row[column_index])) for row in (TABLE_COLUMNS, *rows))
@@ -74,7 +74,7 @@ class RecognitionResult:
     raw_hypothesis: str | None = None
 
 
-def render_recognition_results(results: Sequence[RecognitionResult]) -> str:
+def render_recognition_results(results: Sequence[RecognitionResult]) -> str:  # noqa
     lines = ["识别结果："]
     if not results:
         lines.append("没有成功识别的样本。")
@@ -95,6 +95,111 @@ def render_recognition_results(results: Sequence[RecognitionResult]) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class ModelAccuracy:
+    name: str
+    successful_samples: int
+    total_samples: int
+    compared_samples: int
+    exact_matches: int
+    error_rate: float | None
+
+
+def calculate_model_accuracy(
+    summary: ModelSummary,
+    results: Sequence[RecognitionResult],
+) -> ModelAccuracy:
+    compared_samples = 0
+    exact_matches = 0
+    total_reference_characters = 0
+    total_errors = 0
+    for result in results:
+        score = calculate_character_errors(result.reference, result.hypothesis)
+        if score is None:
+            continue
+        errors, reference_characters = score
+        compared_samples += 1
+        exact_matches += errors == 0
+        total_errors += errors
+        total_reference_characters += reference_characters
+
+    error_rate = (
+        total_errors / total_reference_characters
+        if total_reference_characters
+        else None
+    )
+    return ModelAccuracy(
+        summary.name,
+        summary.successful_samples,
+        summary.total_samples,
+        compared_samples,
+        exact_matches,
+        error_rate,
+    )
+
+
+def group_results_by_sample(
+    results: Sequence[RecognitionResult],
+) -> dict[str, list[RecognitionResult]]:
+    grouped_results: dict[str, list[RecognitionResult]] = {}
+    for result in results:
+        grouped_results.setdefault(result.sample_id, []).append(result)
+    return grouped_results
+
+
+def character_error_rate(reference: str, hypothesis: str) -> float | None:
+    """计算忽略大小写、空白和标点后的字符错误率。"""
+
+    score = calculate_character_errors(reference, hypothesis)
+    if score is None:
+        return None
+    errors, reference_characters = score
+    return errors / reference_characters
+
+
+def calculate_character_errors(
+    reference: str,
+    hypothesis: str,
+) -> tuple[int, int] | None:
+    normalized_reference = normalize_for_comparison(reference)
+    if not normalized_reference:
+        return None
+    normalized_hypothesis = normalize_for_comparison(hypothesis)
+    return (
+        edit_distance(normalized_reference, normalized_hypothesis),
+        len(normalized_reference),
+    )
+
+
+def normalize_for_comparison(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(
+        character
+        for character in normalized
+        if not character.isspace()
+        and not unicodedata.category(character).startswith("P")
+    )
+
+
+def edit_distance(reference: str, hypothesis: str) -> int:
+    """返回把参考文本变成识别文本所需的最少字符编辑次数。"""
+
+    previous_row = list(range(len(hypothesis) + 1))
+    for reference_index, reference_character in enumerate(reference, start=1):
+        current_row = [reference_index]
+        for hypothesis_index, hypothesis_character in enumerate(hypothesis, start=1):
+            current_row.append(
+                min(
+                    current_row[-1] + 1,
+                    previous_row[hypothesis_index] + 1,
+                    previous_row[hypothesis_index - 1]
+                    + (reference_character != hypothesis_character),
+                )
+            )
+        previous_row = current_row
+    return previous_row[-1]
+
+
 def render_row(values: Sequence[str], widths: Sequence[int]) -> str:
     cells = [pad_cell(str(value), width) for value, width in zip(values, widths)]
     return "| " + " | ".join(cells) + " |"
@@ -113,6 +218,12 @@ def display_width(value: str) -> int:
         else 1
         for character in value
     )
+
+
+def format_error_rate(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.2%}"
 
 
 def format_ratio(value: float) -> str:

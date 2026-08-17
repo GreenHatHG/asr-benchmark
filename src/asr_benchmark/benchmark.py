@@ -37,12 +37,12 @@ from .adapters.fun_asr import (
 )
 from .adapters.llm_asr import LLM_ASR_MODEL_NAME, LlmAsrConfig, create_llm_asr
 from .adapters.qwen3_asr import create_qwen3_asr_0_6b, create_qwen3_asr_1_7b
-from .reporting import (
-    ModelSummary,
-    RecognitionResult,
-    render_recognition_results,
-    render_summary_table,
+from .markdown_reporting import (
+    MarkdownReportError,
+    report_markdown_path_for_config,
+    write_markdown_report,
 )
+from .reporting import ModelSummary, RecognitionResult
 from .transcription_cache import (
     CachedModel,
     CachedTranscription,
@@ -816,23 +816,22 @@ def run_sample(
     total_elapsed = 0.0
     for run_index in range(runs):
         run_number = run_index + 1
+        run_progress = f"，运行进度={run_number}/{runs}" if runs > 1 else ""
         logger.info(
-            "正在识别：模型=%s，样本=%s，运行进度=%d/%d",
+            "正在识别：模型=%s，样本=%s%s",
             adapter.name,
             sample.sample_id,
-            run_number,
-            runs,
+            run_progress,
         )
         started_at = time.perf_counter()
         hypothesis = transcribe(adapter, sample.audio_path)
         run_elapsed = time.perf_counter() - started_at
         total_elapsed += run_elapsed
         logger.info(
-            "单次识别完成：模型=%s，样本=%s，运行进度=%d/%d，耗时=%.2f 秒",
+            "单次识别完成：模型=%s，样本=%s%s，耗时=%.2f 秒",
             adapter.name,
             sample.sample_id,
-            run_number,
-            runs,
+            run_progress,
             run_elapsed,
         )
         if run_index == 0:
@@ -979,9 +978,19 @@ def main() -> int:
         len(recognition_results),
         len(failures),
     )
-    print(render_recognition_results(recognition_results))
-    print()
-    print(render_summary_table(summaries))
+    report_path = report_markdown_path_for_config(arguments.config)
+    try:
+        write_markdown_report(
+            summaries,
+            recognition_results,
+            report_path,
+            samples=config.samples,
+            failures=failures,
+        )
+    except MarkdownReportError as error:
+        print(f"错误：{error}", file=sys.stderr)
+        return 2
+    print(f"识别对比报告：{report_path}")
     print(f"\n转写缓存：{cache_path}")
     print_failures(failures)
     return 1 if failures else 0
