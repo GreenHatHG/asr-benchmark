@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ MAX_ATTEMPTS: Final = 3
 RETRY_BASE_DELAY_SECONDS: Final = 1.0
 RETRY_MAX_DELAY_SECONDS: Final = 8.0
 RETRYABLE_STATUS_CODES: Final = frozenset({408, 409, 429})
+logger = logging.getLogger(__name__)
 TRANSCRIPTION_PROMPT: Final = """你是专业的音频转写助手。
 
 请准确转写这段音频，保持音频使用的原语言，并保留人名、公司名、产品名和英文词的原始表达。
@@ -81,7 +83,17 @@ class LlmAsrAdapter:
                     raise RuntimeError(f"LLM ASR 请求失败：{error}") from error
                 last_error = error
                 if attempt < MAX_ATTEMPTS:
-                    time.sleep(_retry_delay_seconds(attempt))
+                    retry_delay_seconds = _retry_delay_seconds(attempt)
+                    logger.warning(
+                        "LLM ASR 请求失败，将在 %.1f 秒后重试：音频=%s，"
+                        "请求进度=%d/%d，错误=%s",
+                        retry_delay_seconds,
+                        audio_path,
+                        attempt,
+                        MAX_ATTEMPTS,
+                        error,
+                    )
+                    time.sleep(retry_delay_seconds)
 
         if last_error is None:
             raise AssertionError("LLM ASR 重试结束后没有记录错误")

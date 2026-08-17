@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import gc
 import hashlib
+import logging
 import math
 import sys
 import time
@@ -51,6 +52,7 @@ from .transcription_cache import (
 
 DEFAULT_RUNS = 1
 DEFAULT_WARMUP_RUNS = 0
+logger = logging.getLogger(__name__)
 MODEL_FACTORIES: dict[str, Callable[[], Any]] = {
     "Qwen3-ASR-0.6B": create_qwen3_asr_0_6b,
     "Qwen3-ASR-1.7B": create_qwen3_asr_1_7b,
@@ -437,7 +439,20 @@ def benchmark_models(  # pylint: disable=too-many-arguments
     recognition_results: list[RecognitionResult] = []
     failures: list[SampleFailure] = []
     validate_model_names(model_names)
-    for model_name in model_names:
+    logger.info(
+        "开始基准测试：模型数=%d，样本数=%d，正式运行次数=%d，预热次数=%d",
+        len(model_names),
+        len(samples),
+        runs,
+        warmup_runs,
+    )
+    for model_index, model_name in enumerate(model_names, start=1):
+        logger.info(
+            "开始处理模型 [%d/%d]：%s",
+            model_index,
+            len(model_names),
+            model_name,
+        )
         summary, model_results, model_failures = benchmark_registered_model(
             model_name,
             samples,
@@ -449,6 +464,14 @@ def benchmark_models(  # pylint: disable=too-many-arguments
         summaries.append(summary)
         recognition_results.extend(model_results)
         failures.extend(model_failures)
+        logger.info(
+            "模型处理完成 [%d/%d]：%s，成功样本=%d，失败样本=%d",
+            model_index,
+            len(model_names),
+            model_name,
+            summary.successful_samples,
+            summary.failed_samples,
+        )
     return summaries, recognition_results, failures
 
 
@@ -471,14 +494,21 @@ def benchmark_registered_model(  # pylint: disable=too-many-arguments
         )
         if cached_outcome is not None:
             summary, recognition_results = cached_outcome
+            logger.info("模型全部样本命中缓存，跳过加载和识别：%s", model_name)
             return summary, recognition_results, []
 
     # 加载耗时单独统计，不会混入后面的单次识别耗时。
+    logger.info("正在加载模型：%s", model_name)
     load_started_at = time.perf_counter()
     try:
         adapter = load_adapter(model_name, llm_config)
     except Exception as error:  # noqa: BLE001 - one model failure must not stop the run
         load_latency_seconds = time.perf_counter() - load_started_at
+        logger.exception(
+            "模型加载失败：%s，耗时=%.2f 秒",
+            model_name,
+            load_latency_seconds,
+        )
         return (
             empty_summary(
                 model_name,
@@ -491,6 +521,13 @@ def benchmark_registered_model(  # pylint: disable=too-many-arguments
         )
 
     load_latency_seconds = time.perf_counter() - load_started_at
+    logger.info(
+        "模型加载完成：%s，报告名称=%s，设备=%s，耗时=%.2f 秒",
+        model_name,
+        adapter.name,
+        adapter.device,
+        load_latency_seconds,
+    )
     try:
         active_cache = None
         if cache is not None:
@@ -501,7 +538,15 @@ def benchmark_registered_model(  # pylint: disable=too-many-arguments
                 load_latency_seconds,
             )
             active_cache = ActiveModelCache(cache, model_name)
-        warm_up_adapter(adapter, samples[0], warmup_runs)
+        if warmup_runs:
+            logger.info(
+                "开始模型预热：%s，样本=%s，次数=%d",
+                adapter.name,
+                samples[0].sample_id,
+                warmup_runs,
+            )
+            warm_up_adapter(adapter, samples[0], warmup_runs)
+            logger.info("模型预热完成：%s", adapter.name)
         return benchmark_model(
             adapter,
             samples,
@@ -512,11 +557,14 @@ def benchmark_registered_model(  # pylint: disable=too-many-arguments
     finally:
         # 即使 close 自身失败，也要删除当前引用并触发垃圾回收，避免
         # 前一个模型占用的内存影响下一个模型。
+        adapter_name = adapter.name
+        logger.info("正在释放模型资源：%s", adapter_name)
         try:
             close_adapter(adapter)
         finally:
             del adapter
             gc.collect()
+        logger.info("模型资源释放完成：%s", adapter_name)
 
 
 def restore_completed_model(
@@ -586,8 +634,20 @@ def warm_up_adapter(
 
     for run_number in range(1, warmup_runs + 1):
         try:
+            logger.info(
+                "正在预热：模型=%s，进度=%d/%d",
+                adapter.name,
+                run_number,
+                warmup_runs,
+            )
             transcribe(adapter, sample.audio_path)
         except Exception as error:
+            logger.exception(
+                "模型预热失败：模型=%s，进度=%d/%d",
+                adapter.name,
+                run_number,
+                warmup_runs,
+            )
             raise BenchmarkError(
                 f"模型 {adapter.name} 第 {run_number} 次预热失败：{error}"
             ) from error
@@ -613,18 +673,33 @@ def benchmark_model(
     recognition_results: list[RecognitionResult] = []
     failures: list[SampleFailure] = []
 
-    for sample in samples:
+    for sample_index, sample in enumerate(samples, start=1):
         cached_transcription = get_cached_transcription(
             active_cache,
             sample.sample_id,
         )
         if cached_transcription is None:
+            logger.info(
+                "开始识别样本 [%d/%d]：模型=%s，样本=%s，音频=%s",
+                sample_index,
+                len(samples),
+                adapter.name,
+                sample.sample_id,
+                sample.audio_path,
+            )
             try:
                 raw_hypothesis, hypothesis, sample_elapsed = run_sample(
                     adapter, sample, runs
                 )
             except Exception as error:  # noqa: BLE001 - continue with remaining samples
                 # 一条音频失败不应阻止同一模型继续测试配置中的其他音频。
+                logger.exception(
+                    "样本识别失败 [%d/%d]：模型=%s，样本=%s",
+                    sample_index,
+                    len(samples),
+                    adapter.name,
+                    sample.sample_id,
+                )
                 failures.append(
                     SampleFailure(adapter.name, sample.sample_id, str(error))
                 )
@@ -639,10 +714,22 @@ def benchmark_model(
                         sample_elapsed,
                     ),
                 )
+                logger.info(
+                    "样本结果已保存到缓存：模型=%s，样本=%s",
+                    adapter.name,
+                    sample.sample_id,
+                )
         else:
             raw_hypothesis = cached_transcription.raw_hypothesis
             hypothesis = cached_transcription.hypothesis
             sample_elapsed = cached_transcription.elapsed_seconds
+            logger.info(
+                "样本命中缓存 [%d/%d]：模型=%s，样本=%s",
+                sample_index,
+                len(samples),
+                adapter.name,
+                sample.sample_id,
+            )
 
         recognition_results.append(
             RecognitionResult(
@@ -655,6 +742,14 @@ def benchmark_model(
         )
         elapsed_seconds += sample_elapsed
         processed_audio_seconds += sample.duration_seconds * runs
+        logger.info(
+            "样本处理完成 [%d/%d]：模型=%s，样本=%s，正式运行总耗时=%.2f 秒",
+            sample_index,
+            len(samples),
+            adapter.name,
+            sample.sample_id,
+            sample_elapsed,
+        )
 
     if not recognition_results:
         return (
@@ -714,9 +809,26 @@ def run_sample(
     first_hypothesis = ""
     total_elapsed = 0.0
     for run_index in range(runs):
+        run_number = run_index + 1
+        logger.info(
+            "正在识别：模型=%s，样本=%s，运行进度=%d/%d",
+            adapter.name,
+            sample.sample_id,
+            run_number,
+            runs,
+        )
         started_at = time.perf_counter()
         hypothesis = transcribe(adapter, sample.audio_path)
-        total_elapsed += time.perf_counter() - started_at
+        run_elapsed = time.perf_counter() - started_at
+        total_elapsed += run_elapsed
+        logger.info(
+            "单次识别完成：模型=%s，样本=%s，运行进度=%d/%d，耗时=%.2f 秒",
+            adapter.name,
+            sample.sample_id,
+            run_number,
+            runs,
+            run_elapsed,
+        )
         if run_index == 0:
             first_raw_hypothesis = get_last_raw_text(adapter)
             first_hypothesis = hypothesis
@@ -781,6 +893,22 @@ def print_failures(failures: Sequence[SampleFailure]) -> None:
         )
 
 
+def configure_progress_logging() -> None:
+    """只为当前项目启用写入标准错误流的进度日志。"""
+
+    project_logger = logging.getLogger("asr_benchmark")
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    project_logger.addHandler(handler)
+    project_logger.setLevel(logging.INFO)
+    project_logger.propagate = False
+
+
 def main() -> int:
     """组织配置读取、模型测试和结果输出，并返回进程退出码。
 
@@ -788,14 +916,34 @@ def main() -> int:
     时返回 0，便于脚本或持续集成环境判断本次测试结果。
     """
 
+    configure_progress_logging()
     arguments = parse_arguments()
+    logger.info("正在读取配置：%s", arguments.config.expanduser().resolve())
     try:
         config = load_config(arguments.config)
+        logger.info(
+            "配置读取完成：模型数=%d，样本数=%d，正式运行次数=%d，预热次数=%d",
+            len(config.model_names),
+            len(config.samples),
+            config.runs,
+            config.warmup_runs,
+        )
         cache_path = cache_path_for_config(arguments.config)
+        cache_action = "读取" if arguments.resume and cache_path.exists() else "初始化"
+        logger.info(
+            "正在%s转写缓存：%s",
+            cache_action,
+            cache_path,
+        )
         cache = TranscriptionCache.prepare(
             cache_path,
             build_configuration_fingerprint(arguments.config, config.samples),
             resume=arguments.resume,
+        )
+        logger.info(
+            "%s转写缓存完成：%s",
+            cache_action,
+            cache_path,
         )
         summaries, recognition_results, failures = benchmark_models(
             config.model_names,
@@ -809,6 +957,12 @@ def main() -> int:
         print(f"错误：{error}", file=sys.stderr)
         return 2
 
+    logger.info(
+        "基准测试完成：模型数=%d，成功结果=%d，失败数=%d",
+        len(summaries),
+        len(recognition_results),
+        len(failures),
+    )
     print(render_recognition_results(recognition_results))
     print()
     print(render_summary_table(summaries))
