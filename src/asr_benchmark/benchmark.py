@@ -5,6 +5,8 @@
 正式识别，然后输出参考文本、识别文本、模型加载耗时和处理音频的速度。
 """
 
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 import argparse
@@ -40,6 +42,12 @@ from .markdown_reporting import (
     MarkdownReportError,
     report_markdown_path_for_config,
     write_markdown_report,
+)
+from .manual_results import (
+    ManualResultsError,
+    build_manual_report_data,
+    load_manual_results,
+    manual_results_path_for_config,
 )
 from .reporting import ModelSummary, RecognitionResult, calculate_timing_metrics
 from .transcription_cache import (
@@ -931,6 +939,17 @@ def main() -> int:
             config.runs,
             config.warmup_runs,
         )
+        manual_results_path = manual_results_path_for_config(arguments.config)
+        manual_transcriptions = load_manual_results(
+            manual_results_path,
+            tuple(sample.sample_id for sample in config.samples),
+        )
+        if manual_transcriptions:
+            logger.info(
+                "手动转写读取完成：%s，结果数=%d",
+                manual_results_path,
+                len(manual_transcriptions),
+            )
         if arguments.normalize_audio:
             logger.info("正在原地标准化音频：样本数=%d", len(config.samples))
             normalize_audio_files(tuple(sample.audio_path for sample in config.samples))
@@ -961,9 +980,17 @@ def main() -> int:
             config.llm_config,
             cache=cache,
         )
+        manual_summaries, manual_recognition_results = build_manual_report_data(
+            manual_transcriptions,
+            config.samples,
+            tuple(summary.name for summary in summaries),
+        )
+        summaries.extend(manual_summaries)
+        recognition_results.extend(manual_recognition_results)
     except (
         AudioNormalizationError,
         BenchmarkError,
+        ManualResultsError,
         TranscriptionCacheError,
     ) as error:
         print(f"错误：{error}", file=sys.stderr)
@@ -989,6 +1016,8 @@ def main() -> int:
         return 2
     print(f"识别对比报告：{report_path}")
     print(f"\n转写缓存：{cache_path}")
+    if manual_transcriptions:
+        print(f"\n手动转写：{manual_results_path}")
     print_failures(failures)
     return 1 if failures else 0
 

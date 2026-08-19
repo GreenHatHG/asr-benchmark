@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .manual_results import MANUAL_REPORT_NAME_SUFFIX, is_manual_report_name
 from .reporting import (
     ModelAccuracy,
     ModelSummary,
@@ -121,10 +122,16 @@ def render_markdown_report(
         "# ASR 识别效果对比",
         "",
         "字符错误率越低越好；计算时忽略大小写、空白和标点。",
-        "",
-        "## 模型汇总",
-        "",
     ]
+    if any(is_manual_report_name(summary.name) for summary in summaries):
+        lines.extend(
+            (
+                "",
+                "标有“手动导入”的结果来自人工保存的网页转写，只参与识别"
+                "准确度比较，不包含运行次数和耗时。",
+            )
+        )
+    lines.extend(("", "## 模型汇总", ""))
     lines.extend(render_summary_table(summaries, results))
     report_samples = tuple(samples) if samples is not None else derive_samples(results)
     if not report_samples:
@@ -204,6 +211,8 @@ def render_sample_section(
                 if result is not None
                 else f"识别失败：{failure.message}"
                 if failure is not None
+                else "没有手动结果"
+                if is_manual_report_name(summary.name)
                 else "没有识别结果"
             )
             lines.append(
@@ -298,15 +307,18 @@ def sample_failures_by_model(
 
 
 def model_identity(model_name: str) -> ModelIdentity:
+    manually_imported = is_manual_report_name(model_name)
+    if manually_imported:
+        model_name = model_name.removesuffix(MANUAL_REPORT_NAME_SUFFIX)
     if "Qwen3-ASR-" in model_name:
         version = model_name.split("Qwen3-ASR-", maxsplit=1)[1]
         version = version.replace("-hf (", " · ").removesuffix(")")
-        return ModelIdentity("Qwen3-ASR", version)
-    if "FireRedASR2-" in model_name:
+        identity = ModelIdentity("Qwen3-ASR", version)
+    elif "FireRedASR2-" in model_name:
         version = model_name.split("FireRedASR2-", maxsplit=1)[1]
         version = version.replace(") + ", " · ").replace(" (", " · ")
-        return ModelIdentity("FireRedASR2", version.removesuffix(")"))
-    if "Fun-ASR-Nano" in model_name:
+        identity = ModelIdentity("FireRedASR2", version.removesuffix(")"))
+    elif "Fun-ASR-Nano" in model_name:
         if "官方原始权重" in model_name:
             version = "官方原始权重"
         elif "(MLX " in model_name:
@@ -315,13 +327,21 @@ def model_identity(model_name: str) -> ModelIdentity:
             )
         else:
             version = model_name.split("Fun-ASR-Nano", maxsplit=1)[1].strip(" -()")
-        return ModelIdentity("Fun-ASR-Nano", version)
-    if model_name.startswith("LLM-ASR"):
+        identity = ModelIdentity("Fun-ASR-Nano", version)
+    elif model_name.startswith("LLM-ASR"):
         version = model_name.removeprefix("LLM-ASR").strip(" ()") or "远程模型"
-        return ModelIdentity("LLM-ASR", version)
-    if model_name == "Doubao-IME-ASR":
-        return ModelIdentity("Doubao", "IME-ASR")
-    return ModelIdentity(model_name, "默认版本")
+        identity = ModelIdentity("LLM-ASR", version)
+    elif model_name == "Doubao-IME-ASR":
+        identity = ModelIdentity("Doubao", "IME-ASR")
+    elif model_name == "通义听悟-网页版":
+        identity = ModelIdentity("通义听悟", "网页版")
+    else:
+        identity = ModelIdentity(model_name, "默认版本")
+    return mark_manual_identity(identity) if manually_imported else identity
+
+
+def mark_manual_identity(identity: ModelIdentity) -> ModelIdentity:
+    return ModelIdentity(identity.series, f"{identity.version}（手动导入）")
 
 
 def format_exact_matches(accuracy: ModelAccuracy) -> str:
