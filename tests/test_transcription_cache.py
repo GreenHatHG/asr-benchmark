@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,6 @@ from asr_benchmark.benchmark import (
     AudioSample,
     ModelAdapter,
     benchmark_models,
-    build_configuration_fingerprint,
 )
 from asr_benchmark.transcription_cache import (
     CachedTranscription,
@@ -24,7 +24,7 @@ class TranscriptionCacheTest(unittest.TestCase):
     def test_default_overwrites_cache_and_resume_loads_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             cache_path = Path(temporary_directory) / "benchmark.toml.cache.json"
-            cache = TranscriptionCache.prepare(cache_path, "fingerprint", resume=False)
+            cache = TranscriptionCache.prepare(cache_path, resume=False)
             cache.set_model_metadata(MODEL_NAME, "报告模型", "cpu", 0.5)
             cache.set_transcription(
                 MODEL_NAME,
@@ -34,7 +34,6 @@ class TranscriptionCacheTest(unittest.TestCase):
 
             resumed = TranscriptionCache.prepare(
                 cache_path,
-                "fingerprint",
                 resume=True,
             )
             resumed_model = resumed.get_model(MODEL_NAME)
@@ -47,64 +46,157 @@ class TranscriptionCacheTest(unittest.TestCase):
 
             overwritten = TranscriptionCache.prepare(
                 cache_path,
-                "fingerprint",
                 resume=False,
             )
             self.assertIsNone(overwritten.get_model(MODEL_NAME))
+            self.assertNotIn(
+                "version",
+                json.loads(cache_path.read_text(encoding="utf-8")),
+            )
 
-    def test_resume_rejects_cache_from_different_configuration(self) -> None:
+    def test_resume_rejects_invalid_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             cache_path = Path(temporary_directory) / "benchmark.toml.cache.json"
-            TranscriptionCache.prepare(cache_path, "old", resume=False)
+            cache_path.write_text("不是 JSON", encoding="utf-8")
 
             with self.assertRaisesRegex(
                 TranscriptionCacheError,
-                "与当前配置或音频不匹配",
+                "读取转写缓存失败",
             ):
-                TranscriptionCache.prepare(cache_path, "new", resume=True)
+                TranscriptionCache.prepare(cache_path, resume=True)
 
-    def test_resume_rejects_boolean_cache_version(self) -> None:
+    def test_resume_rejects_invalid_cache_content(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             cache_path = Path(temporary_directory) / "benchmark.toml.cache.json"
             cache_path.write_text(
-                '{"version": true, "configuration_fingerprint": "fingerprint", '
-                '"models": {}}',
+                '{"models": []}',
                 encoding="utf-8",
             )
 
             with self.assertRaisesRegex(
                 TranscriptionCacheError,
-                "版本不受支持",
+                "models 必须是对象",
             ):
                 TranscriptionCache.prepare(
                     cache_path,
-                    "fingerprint",
                     resume=True,
                 )
 
-    def test_audio_content_change_changes_configuration_fingerprint(self) -> None:
+    def test_resume_rejects_number_too_large_for_timing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            directory = Path(temporary_directory)
-            config_path = directory / "benchmark.toml"
-            audio_path = directory / "sample.wav"
-            config_path.write_text('models = ["Doubao-IME-ASR"]', encoding="utf-8")
-            audio_path.write_bytes(b"first audio content")
-            samples = (AudioSample("sample-1", audio_path, "参考", 1.0),)
-
-            original = build_configuration_fingerprint(config_path, samples)
-            audio_path.write_bytes(b"changed audio content")
-
-            self.assertNotEqual(
-                build_configuration_fingerprint(config_path, samples),
-                original,
+            cache_path = Path(temporary_directory) / "benchmark.toml.cache.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "models": {
+                            MODEL_NAME: {
+                                "report_name": "缓存模型",
+                                "device": "cpu",
+                                "load_latency_seconds": 10**1000,
+                                "transcriptions": {},
+                            }
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
             )
+
+            with self.assertRaisesRegex(
+                TranscriptionCacheError,
+                "load_latency_seconds 必须是大于或等于 0 的数字",
+            ):
+                TranscriptionCache.prepare(cache_path, resume=True)
+
+    def test_resume_ignores_legacy_and_unknown_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_path = Path(temporary_directory) / "benchmark.toml.cache.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "configuration_fingerprint": "旧摘要",
+                        "unknown": "忽略",
+                        "models": {
+                            MODEL_NAME: {
+                                "report_name": "缓存模型",
+                                "device": "cpu",
+                                "load_latency_seconds": 0.5,
+                                "transcriptions": {
+                                    "sample-1": {
+                                        "raw_hypothesis": None,
+                                        "hypothesis": "缓存结果",
+                                        "elapsed_seconds": 2.0,
+                                        "runs": 2,
+                                        "unknown": "忽略",
+                                    }
+                                },
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            cache = TranscriptionCache.prepare(cache_path, resume=True)
+
+            cached_model = cache.get_model(MODEL_NAME)
+            self.assertIsNotNone(cached_model)
+            assert cached_model is not None
+            self.assertEqual(
+                cached_model.transcriptions["sample-1"],
+                CachedTranscription(None, "缓存结果", 2.0, 2),
+            )
+
+    def test_resume_rejects_invalid_transcription_fields(self) -> None:
+        invalid_fields = (
+            ("raw_hypothesis", 1, "raw_hypothesis 必须是字符串或 null"),
+            ("hypothesis", None, "hypothesis 必须是字符串"),
+            ("elapsed_seconds", -1, "elapsed_seconds 必须是大于或等于 0 的数字"),
+            ("runs", 0, "runs 必须是大于或等于 1 的整数"),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            cache_path = Path(temporary_directory) / "benchmark.toml.cache.json"
+            for field_name, invalid_value, expected_message in invalid_fields:
+                with self.subTest(field_name=field_name):
+                    transcription = {
+                        "raw_hypothesis": None,
+                        "hypothesis": "缓存结果",
+                        "elapsed_seconds": 2.0,
+                        "runs": 2,
+                    }
+                    transcription[field_name] = invalid_value
+                    cache_path.write_text(
+                        json.dumps(
+                            {
+                                "models": {
+                                    MODEL_NAME: {
+                                        "report_name": "缓存模型",
+                                        "device": "cpu",
+                                        "load_latency_seconds": 0.5,
+                                        "transcriptions": {
+                                            "sample-1": transcription,
+                                        },
+                                    }
+                                }
+                            },
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        TranscriptionCacheError,
+                        expected_message,
+                    ):
+                        TranscriptionCache.prepare(cache_path, resume=True)
 
     def test_complete_cache_skips_model_loading(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             cache = TranscriptionCache.prepare(
                 directory / "benchmark.toml.cache.json",
-                "fingerprint",
                 resume=False,
             )
             samples = self._samples(directory)
@@ -112,12 +204,12 @@ class TranscriptionCacheTest(unittest.TestCase):
             cache.set_transcription(
                 MODEL_NAME,
                 "sample-1",
-                CachedTranscription("原文一", "结果一", 1.0),
+                CachedTranscription("原文一", "结果一", 1.0, 1),
             )
             cache.set_transcription(
                 MODEL_NAME,
                 "sample-2",
-                CachedTranscription(None, "结果二", 2.0),
+                CachedTranscription(None, "结果二", 2.0, 1),
             )
 
             with patch(
@@ -145,7 +237,6 @@ class TranscriptionCacheTest(unittest.TestCase):
             cache_path = directory / "benchmark.toml.cache.json"
             cache = TranscriptionCache.prepare(
                 cache_path,
-                "fingerprint",
                 resume=False,
             )
             samples = self._samples(directory)
@@ -153,7 +244,7 @@ class TranscriptionCacheTest(unittest.TestCase):
             cache.set_transcription(
                 MODEL_NAME,
                 "sample-1",
-                CachedTranscription(None, "缓存结果", 1.0),
+                CachedTranscription(None, "缓存结果", 1.0, 1),
             )
             transcribed_paths: list[Path] = []
 
@@ -178,7 +269,6 @@ class TranscriptionCacheTest(unittest.TestCase):
             self.assertEqual(failures, [])
             reloaded = TranscriptionCache.prepare(
                 cache_path,
-                "fingerprint",
                 resume=True,
             )
             reloaded_model = reloaded.get_model(MODEL_NAME)

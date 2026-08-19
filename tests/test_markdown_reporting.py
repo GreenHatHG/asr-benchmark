@@ -32,11 +32,16 @@ class MarkdownReportingTest(unittest.TestCase):
 
         self.assertLess(summary.index("|  | 1.7B |"), summary.index("| Doubao |"))
         self.assertEqual(
-            report.count("| 系列 | 模型版本 | 字符错误率 | 识别文本 |"),
+            report.count(
+                "| 系列 | 模型版本 | 字符错误率 | 运行次数 | 总耗时(s) | 耗时说明 | 识别文本 |"
+            ),
             1,
         )
-        self.assertIn("| 参考 | 参考文本 | - | 你好，世界 |", report)
-        self.assertIn("| Qwen3-ASR | 0.6B | 0.00% | 你好世界 |", report)
+        self.assertIn("| 参考 | 参考文本 | - | - | - | - | 你好，世界 |", report)
+        self.assertIn(
+            "| Qwen3-ASR | 0.6B | 0.00% | - | - | - | 你好世界 |",
+            report,
+        )
         self.assertIn("结果\\|三", report)
         self.assertIn("## 样本：sample|1", report)
 
@@ -65,7 +70,10 @@ class MarkdownReportingTest(unittest.TestCase):
             "音频文件：sample.wav · 时长：12.35 秒 · 参考文本长度：2 个字符",
             report,
         )
-        self.assertIn("| Doubao | IME-ASR | - | 识别失败：请求超时 |", report)
+        self.assertIn(
+            "| Doubao | IME-ASR | - | - | - | - | 识别失败：请求超时 |",
+            report,
+        )
 
     def test_report_is_saved_next_to_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

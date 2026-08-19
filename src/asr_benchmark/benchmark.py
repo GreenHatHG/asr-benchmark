@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import hashlib
 import logging
 import math
 import sys
@@ -42,7 +41,7 @@ from .markdown_reporting import (
     report_markdown_path_for_config,
     write_markdown_report,
 )
-from .reporting import ModelSummary, RecognitionResult
+from .reporting import ModelSummary, RecognitionResult, calculate_timing_metrics
 from .transcription_cache import (
     CachedModel,
     CachedTranscription,
@@ -137,7 +136,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="复用缓存中已成功的转写，只运行尚未完成的模型和样本",
+        help="按模型名和样本 id 复用缓存中已成功的转写，只运行未命中的部分",
     )
     parser.add_argument(
         "--normalize-audio",
@@ -187,32 +186,6 @@ def load_config(config_path: Path) -> BenchmarkConfig:
     if len(samples) != len({sample.sample_id for sample in samples}):
         raise BenchmarkError("配置中的 samples id 必须唯一")
     return BenchmarkConfig(model_names, samples, runs, warmup_runs, llm_config)
-
-
-def build_configuration_fingerprint(
-    config_path: Path,
-    samples: Sequence[AudioSample],
-) -> str:
-    """计算配置和音频内容的摘要，用于拒绝不匹配的恢复缓存。"""
-
-    fingerprint = hashlib.sha256()
-    paths = (
-        config_path.expanduser().resolve(),
-        *(sample.audio_path for sample in samples),
-    )
-    for path in paths:
-        file_fingerprint = hashlib.sha256()
-        try:
-            with path.open("rb") as input_file:
-                while chunk := input_file.read(1024 * 1024):
-                    file_fingerprint.update(chunk)
-        except OSError as error:
-            raise BenchmarkError(
-                f"计算转写缓存标识时无法读取文件：{path}：{error}"
-            ) from error
-        # 每个文件先生成固定 32 字节的摘要，避免二进制内容与分隔符混淆。
-        fingerprint.update(file_fingerprint.digest())
-    return fingerprint.hexdigest()
 
 
 def parse_model_names(value: Any) -> tuple[str, ...]:
@@ -585,11 +558,9 @@ def restore_completed_model(
     if any(sample.sample_id not in cached_model.transcriptions for sample in samples):
         return None
 
-    elapsed_seconds = 0.0
     recognition_results: list[RecognitionResult] = []
     for sample in samples:
         cached_transcription = cached_model.transcriptions[sample.sample_id]
-        elapsed_seconds += cached_transcription.elapsed_seconds
         recognition_results.append(
             RecognitionResult(
                 model_name=cached_model.report_name,
@@ -597,20 +568,18 @@ def restore_completed_model(
                 reference=sample.reference,
                 raw_hypothesis=cached_transcription.raw_hypothesis,
                 hypothesis=cached_transcription.hypothesis,
+                elapsed_seconds=cached_transcription.elapsed_seconds,
+                runs=cached_transcription.runs,
+                uses_previous_timing=cached_transcription.runs != runs,
             )
         )
-    invocation_count = len(samples) * runs
-    processed_audio_seconds = sum(sample.duration_seconds for sample in samples) * runs
     return (
-        ModelSummary(
-            name=cached_model.report_name,
-            device=cached_model.device,
-            total_samples=len(samples),
-            successful_samples=len(samples),
-            failed_samples=0,
-            load_latency_seconds=cached_model.load_latency_seconds,
-            average_latency_seconds=elapsed_seconds / invocation_count,
-            real_time_factor=elapsed_seconds / processed_audio_seconds,
+        summarize_model_results(
+            cached_model.report_name,
+            cached_model.device,
+            samples,
+            recognition_results,
+            cached_model.load_latency_seconds,
         ),
         recognition_results,
     )
@@ -674,12 +643,11 @@ def benchmark_model(
     空汇总结果。
     """
 
-    elapsed_seconds = 0.0
-    processed_audio_seconds = 0.0
     recognition_results: list[RecognitionResult] = []
     failures: list[SampleFailure] = []
 
     for sample_index, sample in enumerate(samples, start=1):
+        sample_runs: int | None
         cached_transcription = get_cached_transcription(
             active_cache,
             sample.sample_id,
@@ -718,6 +686,7 @@ def benchmark_model(
                         raw_hypothesis,
                         hypothesis,
                         sample_elapsed,
+                        runs,
                     ),
                 )
                 logger.info(
@@ -725,10 +694,14 @@ def benchmark_model(
                     adapter.name,
                     sample.sample_id,
                 )
+            sample_runs = runs
+            uses_previous_timing = False
         else:
             raw_hypothesis = cached_transcription.raw_hypothesis
             hypothesis = cached_transcription.hypothesis
             sample_elapsed = cached_transcription.elapsed_seconds
+            sample_runs = cached_transcription.runs
+            uses_previous_timing = cached_transcription.runs != runs
             logger.info(
                 "样本命中缓存 [%d/%d]：模型=%s，样本=%s",
                 sample_index,
@@ -744,17 +717,20 @@ def benchmark_model(
                 reference=sample.reference,
                 raw_hypothesis=raw_hypothesis,
                 hypothesis=hypothesis,
+                elapsed_seconds=sample_elapsed,
+                runs=sample_runs,
+                uses_previous_timing=uses_previous_timing,
             )
         )
-        elapsed_seconds += sample_elapsed
-        processed_audio_seconds += sample.duration_seconds * runs
         logger.info(
-            "样本处理完成 [%d/%d]：模型=%s，样本=%s，正式运行总耗时=%.2f 秒",
+            "样本处理完成 [%d/%d]：模型=%s，样本=%s，实际运行次数=%s，正式运行总耗时=%.2f 秒%s",
             sample_index,
             len(samples),
             adapter.name,
             sample.sample_id,
+            sample_runs if sample_runs is not None else "未知",
             sample_elapsed,
+            "，使用上次耗时" if uses_previous_timing else "",
         )
 
     if not recognition_results:
@@ -770,15 +746,12 @@ def benchmark_model(
         )
 
     return (
-        ModelSummary(
-            name=adapter.name,
-            device=adapter.device,
-            total_samples=len(samples),
-            successful_samples=len(recognition_results),
-            failed_samples=len(samples) - len(recognition_results),
-            load_latency_seconds=load_latency_seconds,
-            average_latency_seconds=elapsed_seconds / (len(recognition_results) * runs),
-            real_time_factor=elapsed_seconds / processed_audio_seconds,
+        summarize_model_results(
+            adapter.name,
+            adapter.device,
+            samples,
+            recognition_results,
+            load_latency_seconds,
         ),
         recognition_results,
         failures,
@@ -797,6 +770,31 @@ def get_cached_transcription(
     if cached_model is None:
         return None
     return cached_model.transcriptions.get(sample_id)
+
+
+def summarize_model_results(
+    model_name: str,
+    device: str,
+    samples: Sequence[AudioSample],
+    results: Sequence[RecognitionResult],
+    load_latency_seconds: float,
+) -> ModelSummary:
+    """使用每条结果实际记录的耗时和运行次数生成模型汇总。"""
+
+    average_latency_seconds, real_time_factor = calculate_timing_metrics(
+        results,
+        {sample.sample_id: sample.duration_seconds for sample in samples},
+    )
+    return ModelSummary(
+        name=model_name,
+        device=device,
+        total_samples=len(samples),
+        successful_samples=len(results),
+        failed_samples=len(samples) - len(results),
+        load_latency_seconds=load_latency_seconds,
+        average_latency_seconds=average_latency_seconds,
+        real_time_factor=real_time_factor,
+    )
 
 
 def run_sample(
@@ -948,7 +946,6 @@ def main() -> int:
         )
         cache = TranscriptionCache.prepare(
             cache_path,
-            build_configuration_fingerprint(arguments.config, config.samples),
             resume=arguments.resume,
         )
         logger.info(

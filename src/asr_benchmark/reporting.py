@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 TABLE_COLUMNS = (
@@ -72,6 +72,30 @@ class RecognitionResult:
     reference: str
     hypothesis: str
     raw_hypothesis: str | None = None
+    elapsed_seconds: float | None = None
+    runs: int | None = None
+    uses_previous_timing: bool = False
+
+
+def calculate_timing_metrics(
+    results: Sequence[RecognitionResult],
+    duration_by_sample: Mapping[str, float],
+) -> tuple[float, float]:
+    """按每条结果实际运行的次数计算平均耗时和实时率。"""
+
+    total_elapsed_seconds = 0.0
+    total_runs = 0
+    processed_audio_seconds = 0.0
+    for result in results:
+        if result.elapsed_seconds is None or result.runs is None:
+            return math.nan, math.nan
+        total_elapsed_seconds += result.elapsed_seconds
+        total_runs += result.runs
+        processed_audio_seconds += duration_by_sample[result.sample_id] * result.runs
+    return (
+        total_elapsed_seconds / total_runs,
+        total_elapsed_seconds / processed_audio_seconds,
+    )
 
 
 def render_recognition_results(results: Sequence[RecognitionResult]) -> str:  # noqa

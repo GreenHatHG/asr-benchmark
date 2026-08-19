@@ -16,6 +16,7 @@ from .reporting import (
     calculate_model_accuracy,
     character_error_rate,
     format_error_rate,
+    format_seconds,
     group_results_by_sample,
 )
 
@@ -178,9 +179,9 @@ def render_sample_section(
         "",
         render_sample_metadata(sample),
         "",
-        "| 系列 | 模型版本 | 字符错误率 | 识别文本 |",
-        "| --- | --- | ---: | --- |",
-        f"| 参考 | 参考文本 | - | {escape_markdown_cell(display_text(sample.reference))} |",
+        "| 系列 | 模型版本 | 字符错误率 | 运行次数 | 总耗时(s) | 耗时说明 | 识别文本 |",
+        "| --- | --- | ---: | ---: | ---: | --- | --- |",
+        f"| 参考 | 参考文本 | - | - | - | - | {escape_markdown_cell(display_text(sample.reference))} |",
     ]
     results_by_model = {
         result.model_name: result
@@ -212,6 +213,15 @@ def render_sample_section(
                         escape_markdown_cell(series) if summary_index == 0 else "",
                         escape_markdown_cell(identity.version),
                         format_error_rate(error_rate),
+                        str(result.runs)
+                        if result is not None and result.runs is not None
+                        else "-",
+                        format_seconds(result.elapsed_seconds)
+                        if result is not None and result.elapsed_seconds is not None
+                        else "-",
+                        "上次耗时"
+                        if result is not None and result.uses_previous_timing
+                        else "-",
                         escape_markdown_cell(display_text(recognized_text)),
                     )
                 )

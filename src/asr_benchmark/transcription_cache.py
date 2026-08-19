@@ -8,9 +8,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
-
-CACHE_VERSION: Final = 1
+from typing import Any
 
 
 class TranscriptionCacheError(Exception):
@@ -19,11 +17,12 @@ class TranscriptionCacheError(Exception):
 
 @dataclass(frozen=True)
 class CachedTranscription:
-    """保存一条成功转写的文本和正式运行总耗时。"""
+    """保存一条成功转写、正式运行总耗时及其运行次数。"""
 
     raw_hypothesis: str | None
     hypothesis: str
     elapsed_seconds: float
+    runs: int | None = None
 
 
 @dataclass(frozen=True)
@@ -37,41 +36,34 @@ class CachedModel:
 
 
 class TranscriptionCache:
-    """读取和原子更新一个与基准测试配置绑定的 JSON 缓存。"""
+    """读取和原子更新一个 JSON 转写缓存。"""
 
     def __init__(
         self,
         path: Path,
-        configuration_fingerprint: str,
         models: dict[str, CachedModel] | None = None,
     ) -> None:
         self.path = path
-        self.configuration_fingerprint = configuration_fingerprint
         self._models = models or {}
 
     @classmethod
     def prepare(
         cls,
         path: Path,
-        configuration_fingerprint: str,
         *,
         resume: bool,
     ) -> TranscriptionCache:
         """按 ``resume`` 决定读取旧缓存，或立即用空缓存覆盖它。"""
 
         if resume and path.exists():
-            return cls._load(path, configuration_fingerprint)
+            return cls._load(path)
 
-        cache = cls(path, configuration_fingerprint)
+        cache = cls(path)
         cache._save()
         return cache
 
     @classmethod
-    def _load(
-        cls,
-        path: Path,
-        configuration_fingerprint: str,
-    ) -> TranscriptionCache:
+    def _load(cls, path: Path) -> TranscriptionCache:
         try:
             with path.open(encoding="utf-8") as cache_file:
                 payload = json.load(cache_file)
@@ -82,21 +74,6 @@ class TranscriptionCache:
 
         if not isinstance(payload, dict):
             raise TranscriptionCacheError(f"转写缓存的根节点必须是对象：{path}")
-        version = payload.get("version")
-        if (
-            not isinstance(version, int)
-            or isinstance(version, bool)
-            or version != CACHE_VERSION
-        ):
-            raise TranscriptionCacheError(
-                f"转写缓存版本不受支持：{path}；请去掉 --resume 重新运行"
-            )
-        if payload.get("configuration_fingerprint") != configuration_fingerprint:
-            raise TranscriptionCacheError(
-                f"转写缓存与当前配置或音频不匹配：{path}；"
-                "请去掉 --resume 重新运行并覆盖旧缓存"
-            )
-
         models_value = payload.get("models")
         if not isinstance(models_value, dict):
             raise TranscriptionCacheError(f"转写缓存中的 models 必须是对象：{path}")
@@ -108,7 +85,7 @@ class TranscriptionCache:
                 path,
             )
             models[model_name] = _parse_cached_model(model_name, model_value, path)
-        return cls(path, configuration_fingerprint, models)
+        return cls(path, models)
 
     def get_model(self, model_name: str) -> CachedModel | None:
         """返回指定配置模型的缓存；不存在时返回 ``None``。"""
@@ -159,8 +136,6 @@ class TranscriptionCache:
 
     def _save(self) -> None:
         payload = {
-            "version": CACHE_VERSION,
-            "configuration_fingerprint": self.configuration_fingerprint,
             "models": {
                 model_name: {
                     "report_name": model.report_name,
@@ -171,6 +146,7 @@ class TranscriptionCache:
                             "raw_hypothesis": transcription.raw_hypothesis,
                             "hypothesis": transcription.hypothesis,
                             "elapsed_seconds": transcription.elapsed_seconds,
+                            "runs": transcription.runs,
                         }
                         for sample_id, transcription in model.transcriptions.items()
                     },
@@ -272,7 +248,8 @@ def _parse_cached_transcription(
     if not isinstance(hypothesis, str):
         raise TranscriptionCacheError(f"转写缓存中的 hypothesis 必须是字符串：{path}")
     elapsed_seconds = _read_non_negative_number(value, "elapsed_seconds", path)
-    return CachedTranscription(raw_hypothesis, hypothesis, elapsed_seconds)
+    runs = _read_optional_positive_integer(value, "runs", path)
+    return CachedTranscription(raw_hypothesis, hypothesis, elapsed_seconds, runs)
 
 
 def _read_non_empty_string(payload: dict[str, Any], field_name: str, path: Path) -> str:
@@ -292,14 +269,29 @@ def _read_non_negative_number(
     field_name: str,
     path: Path,
 ) -> float:
+    error_message = f"转写缓存中的 {field_name} 必须是大于或等于 0 的数字：{path}"
     value = payload.get(field_name)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TranscriptionCacheError(
-            f"转写缓存中的 {field_name} 必须是大于或等于 0 的数字：{path}"
-        )
-    number = float(value)
+        raise TranscriptionCacheError(error_message)
+    try:
+        number = float(value)
+    except OverflowError as error:
+        raise TranscriptionCacheError(error_message) from error
     if not math.isfinite(number) or number < 0:
-        raise TranscriptionCacheError(
-            f"转写缓存中的 {field_name} 必须是大于或等于 0 的数字：{path}"
-        )
+        raise TranscriptionCacheError(error_message)
     return number
+
+
+def _read_optional_positive_integer(
+    payload: dict[str, Any],
+    field_name: str,
+    path: Path,
+) -> int | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise TranscriptionCacheError(
+            f"转写缓存中的 {field_name} 必须是大于或等于 1 的整数：{path}"
+        )
+    return value
