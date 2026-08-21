@@ -17,8 +17,8 @@ import sys
 import time
 import tomllib
 import wave
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -36,7 +36,11 @@ from .adapters.fun_asr import (
     create_fun_asr_nano_mlx_8bit,
     create_fun_asr_nano_official,
 )
-from .adapters.llm_asr import LLM_ASR_MODEL_NAME, LlmAsrConfig, create_llm_asr
+from .adapters.llm_asr import (
+    LLM_API_KEY_ENV,
+    LlmAsrConfig,
+    create_llm_asr,
+)
 from .adapters.qwen3_asr import create_qwen3_asr_0_6b, create_qwen3_asr_1_7b
 from .markdown_reporting import (
     MarkdownReportError,
@@ -51,6 +55,7 @@ from .manual_results import (
 )
 from .reporting import ModelSummary, RecognitionResult, calculate_timing_metrics
 from .transcription_cache import (
+    CachedLlmConfig,
     CachedModel,
     CachedTranscription,
     TranscriptionCache,
@@ -60,6 +65,7 @@ from .transcription_cache import (
 
 DEFAULT_RUNS = 1
 DEFAULT_WARMUP_RUNS = 0
+NAMED_LLM_MODEL_PREFIX = "llms."
 logger = logging.getLogger(__name__)
 MODEL_FACTORIES: dict[str, Callable[[], Any]] = {
     "Qwen3-ASR-0.6B": create_qwen3_asr_0_6b,
@@ -78,7 +84,7 @@ MODEL_FACTORIES: dict[str, Callable[[], Any]] = {
     "Fun-ASR-Nano-2512-MLX-4bit": create_fun_asr_nano_mlx_4bit,
     DOUBAO_ASR_MODEL_NAME: create_doubao_asr,
 }
-SUPPORTED_MODEL_NAMES = (*MODEL_FACTORIES, LLM_ASR_MODEL_NAME)
+SUPPORTED_MODEL_NAMES = tuple(MODEL_FACTORIES)
 
 
 class BenchmarkError(Exception):
@@ -103,7 +109,7 @@ class BenchmarkConfig:
     samples: tuple[AudioSample, ...]
     runs: int
     warmup_runs: int
-    llm_config: LlmAsrConfig | None = None
+    llm_configs: Mapping[str, LlmAsrConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -180,10 +186,7 @@ def load_config(config_path: Path) -> BenchmarkConfig:
         "warmup_runs",
         minimum=0,
     )
-    llm_config = parse_llm_config(
-        payload.get("llm"),
-        required=LLM_ASR_MODEL_NAME in model_names,
-    )
+    llm_configs = parse_llm_configs(payload, model_names)
     samples_value = payload.get("samples")
     if not isinstance(samples_value, list) or not samples_value:
         raise BenchmarkError("配置中的 samples 必须是非空数组")
@@ -193,7 +196,13 @@ def load_config(config_path: Path) -> BenchmarkConfig:
     )
     if len(samples) != len({sample.sample_id for sample in samples}):
         raise BenchmarkError("配置中的 samples id 必须唯一")
-    return BenchmarkConfig(model_names, samples, runs, warmup_runs, llm_config)
+    return BenchmarkConfig(
+        model_names,
+        samples,
+        runs,
+        warmup_runs,
+        llm_configs=llm_configs,
+    )
 
 
 def parse_model_names(value: Any) -> tuple[str, ...]:
@@ -216,24 +225,67 @@ def parse_run_count(value: Any, field_name: str, *, minimum: int) -> int:
     return value
 
 
-def parse_llm_config(value: Any, *, required: bool) -> LlmAsrConfig | None:
-    """仅在选择 ``LLM-ASR`` 时读取并校验对应的远程接口配置。"""
+def parse_llm_configs(
+    payload: dict[str, Any],
+    model_names: Sequence[str],
+) -> dict[str, LlmAsrConfig]:
+    """读取本次测试实际选择的具名 LLM 配置。"""
 
-    if not required:
-        return None
-    if not isinstance(value, dict):
-        raise BenchmarkError("选择 LLM-ASR 时，配置中必须提供 [llm] 表")
-    model = require_llm_config_string(value, "model")
-    base_url = require_llm_config_string(value, "base_url")
-    return LlmAsrConfig(model=model, base_url=base_url)
+    named_model_names = [
+        model_name
+        for model_name in model_names
+        if model_name.startswith(NAMED_LLM_MODEL_PREFIX)
+    ]
+    if not named_model_names:
+        return {}
+
+    llms_value = payload.get("llms")
+    if not isinstance(llms_value, dict):
+        raise BenchmarkError("选择具名 LLM-ASR 时，配置中必须提供 [llms] 表")
+    configs: dict[str, LlmAsrConfig] = {}
+    for model_name in named_model_names:
+        config_name = model_name.removeprefix(NAMED_LLM_MODEL_PREFIX)
+        config_value = llms_value.get(config_name)
+        if not isinstance(config_value, dict):
+            raise BenchmarkError(
+                f"选择 {model_name} 时，配置中必须提供 [llms.{config_name}] 表"
+            )
+        configs[model_name] = parse_llm_config_table(
+            config_value,
+            f"llms.{config_name}",
+        )
+    return configs
 
 
-def require_llm_config_string(payload: dict[str, Any], field_name: str) -> str:
-    """读取 ``[llm]`` 中的非空字符串，并去掉两端空白。"""
+def parse_llm_config_table(
+    payload: dict[str, Any],
+    table_name: str,
+) -> LlmAsrConfig:
+    """把一个已确认存在的 LLM 配置表转换为运行时配置。"""
 
-    value = payload.get(field_name)
+    model = require_llm_config_string(payload, "model", table_name=table_name)
+    base_url = require_llm_config_string(payload, "base_url", table_name=table_name)
+    api_key_env = require_llm_config_string(
+        payload,
+        "api_key_env",
+        default=LLM_API_KEY_ENV,
+        table_name=table_name,
+    )
+    return LlmAsrConfig(model, base_url, api_key_env)
+
+
+def require_llm_config_string(
+    payload: dict[str, Any],
+    field_name: str,
+    *,
+    table_name: str,
+    default: str | None = None,
+) -> str:
+    """读取 LLM 配置表中的非空字符串，并去掉两端空白。"""
+
+    value = payload.get(field_name, default)
     if not isinstance(value, str) or not value.strip():
-        raise BenchmarkError(f"配置中的 llm.{field_name} 必须是非空字符串")
+        raise BenchmarkError(f"配置中的 {table_name}.{field_name} 必须是非空字符串")
     return value.strip()
 
 
@@ -339,6 +391,10 @@ def validate_model_names(model_names: Sequence[str]) -> None:
         model_name
         for model_name in model_names
         if model_name not in SUPPORTED_MODEL_NAMES
+        and not (
+            model_name.startswith(NAMED_LLM_MODEL_PREFIX)
+            and model_name != NAMED_LLM_MODEL_PREFIX
+        )
     ]
     if unsupported_names:
         raise BenchmarkError(
@@ -351,7 +407,7 @@ def validate_model_names(model_names: Sequence[str]) -> None:
 
 def load_adapter(
     model_name: str,
-    llm_config: LlmAsrConfig | None = None,
+    llm_configs: Mapping[str, LlmAsrConfig] | None = None,
 ) -> ModelAdapter:
     """根据已注册的模型名称创建一个统一的 ``ModelAdapter``。
 
@@ -360,10 +416,12 @@ def load_adapter(
     报告中的完整模型名称和实际运行设备。
     """
 
-    if model_name == LLM_ASR_MODEL_NAME:
-        if llm_config is None:
-            raise BenchmarkError("加载 LLM-ASR 时缺少 [llm] 配置")
-        factory: Callable[[], Any] = partial(create_llm_asr, llm_config)
+    is_llm_asr = model_name.startswith(NAMED_LLM_MODEL_PREFIX)
+    if is_llm_asr:
+        selected_llm_config = llm_configs.get(model_name) if llm_configs else None
+        if selected_llm_config is None:
+            raise BenchmarkError(f"加载模型 {model_name} 时缺少对应的 LLM 配置")
+        factory: Callable[[], Any] = partial(create_llm_asr, selected_llm_config)
     else:
         model_factory = MODEL_FACTORIES.get(model_name)
         if model_factory is None:
@@ -412,7 +470,7 @@ def benchmark_models(  # pylint: disable=too-many-arguments
     samples: Sequence[AudioSample],
     runs: int,
     warmup_runs: int,
-    llm_config: LlmAsrConfig | None = None,
+    llm_configs: Mapping[str, LlmAsrConfig] | None = None,
     *,
     cache: TranscriptionCache | None = None,
 ) -> tuple[list[ModelSummary], list[RecognitionResult], list[SampleFailure]]:
@@ -445,7 +503,7 @@ def benchmark_models(  # pylint: disable=too-many-arguments
             samples,
             runs,
             warmup_runs,
-            llm_config,
+            llm_configs,
             cache=cache,
         )
         summaries.append(summary)
@@ -467,17 +525,19 @@ def benchmark_registered_model(  # pylint: disable=too-many-arguments
     samples: Sequence[AudioSample],
     runs: int,
     warmup_runs: int,
-    llm_config: LlmAsrConfig | None,
+    llm_configs: Mapping[str, LlmAsrConfig] | None,
     *,
     cache: TranscriptionCache | None,
 ) -> tuple[ModelSummary, list[RecognitionResult], list[SampleFailure]]:
     """读取缓存或加载一个配置模型，并完成该模型的所有样本。"""
 
+    cached_llm_config = llm_cache_config(model_name, llm_configs)
     if cache is not None:
         cached_outcome = restore_completed_model(
             cache.get_model(model_name),
             samples,
             runs,
+            cached_llm_config,
         )
         if cached_outcome is not None:
             summary, recognition_results = cached_outcome
@@ -488,7 +548,7 @@ def benchmark_registered_model(  # pylint: disable=too-many-arguments
     logger.info("正在加载模型：%s", model_name)
     load_started_at = time.perf_counter()
     try:
-        adapter = load_adapter(model_name, llm_config)
+        adapter = load_adapter(model_name, llm_configs)
     except Exception as error:  # noqa: BLE001 - one model failure must not stop the run
         load_latency_seconds = time.perf_counter() - load_started_at
         logger.exception(
@@ -523,6 +583,7 @@ def benchmark_registered_model(  # pylint: disable=too-many-arguments
                 adapter.name,
                 adapter.device,
                 load_latency_seconds,
+                cached_llm_config,
             )
             active_cache = ActiveModelCache(cache, model_name)
         if warmup_runs:
@@ -558,10 +619,13 @@ def restore_completed_model(
     cached_model: CachedModel | None,
     samples: Sequence[AudioSample],
     runs: int,
+    llm_config: CachedLlmConfig | None = None,
 ) -> tuple[ModelSummary, list[RecognitionResult]] | None:
     """在模型的所有样本都有缓存时，直接重建报告结果。"""
 
     if cached_model is None:
+        return None
+    if cached_model.llm_config != llm_config:
         return None
     if any(sample.sample_id not in cached_model.transcriptions for sample in samples):
         return None
@@ -591,6 +655,18 @@ def restore_completed_model(
         ),
         recognition_results,
     )
+
+
+def llm_cache_config(
+    model_name: str,
+    llm_configs: Mapping[str, LlmAsrConfig] | None,
+) -> CachedLlmConfig | None:
+    """返回判断当前远程 LLM 缓存是否适用所需的配置。"""
+
+    config = llm_configs.get(model_name) if llm_configs else None
+    if config is None:
+        return None
+    return CachedLlmConfig(config.model, config.base_url)
 
 
 def close_adapter(adapter: ModelAdapter) -> None:
@@ -977,7 +1053,7 @@ def main() -> int:
             config.samples,
             config.runs,
             config.warmup_runs,
-            config.llm_config,
+            config.llm_configs,
             cache=cache,
         )
         manual_summaries, manual_recognition_results = build_manual_report_data(

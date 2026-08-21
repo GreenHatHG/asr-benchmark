@@ -35,6 +35,7 @@ class LlmAsrConfig:
 
     model: str
     base_url: str
+    api_key_env: str = LLM_API_KEY_ENV
 
 
 class _EmptyLlmResponseError(RuntimeError):
@@ -45,9 +46,9 @@ class LlmAsrAdapter:
     """通过 OpenAI 兼容的 ``chat.completions`` 接口识别音频。"""
 
     def __init__(self, config: LlmAsrConfig) -> None:
-        api_key = os.environ.get(LLM_API_KEY_ENV, "").strip()
+        api_key = os.environ.get(config.api_key_env, "").strip()
         if not api_key:
-            raise RuntimeError(f"缺少环境变量：{LLM_API_KEY_ENV}")
+            raise RuntimeError(f"缺少环境变量：{config.api_key_env}")
 
         dependencies = _import_dependencies()
         self._client = dependencies["OpenAI"](
